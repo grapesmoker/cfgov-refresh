@@ -10,7 +10,7 @@ from dateutil.relativedelta import relativedelta
 from rest_framework import generics
 
 from django.shortcuts import render, render_to_response
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django import forms
 from django.utils.safestring import mark_safe
 from django.template import RequestContext
@@ -18,9 +18,11 @@ from django.template.loader import get_template
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Max, Min, Q
+from django.contrib import messages
 
 from cal.models import CFPBCalendar, CFPBCalendarEvent
-
+from v1.util.util import ERROR_MESSAGES
+from sheerlike.templates import get_date_string
 
 ## TODO: Update to python 3 when PDFreactor's python wrapper supports it.
 if six.PY2:
@@ -30,6 +32,31 @@ if six.PY2:
     except ImportError:
        PDFreactor = None
 
+
+class FilterErrorList(forms.utils.ErrorList):
+    def __str__(self):
+        return '\n'.join(str(e) for e in self)
+
+class FilterCheckboxList(forms.MultipleChoiceField):
+    def validate(self, value):
+        if self.required and not value:
+            msg = self.error_messages['required']
+            if self.label and '%s' in msg:
+                msg = msg % self.label
+            raise forms.ValidationError(msg, code='required')
+        return value
+
+class FilterDateField(forms.DateField):
+    def clean(self, value):
+        if value:
+            try:
+                value = get_date_string(value)
+            except ValueError:
+                msg = self.error_messages['invalid']
+                if '%s'in msg:
+                    msg = msg % value
+                raise forms.ValidationError( msg , code='invalid')
+        return value
 
 class CalendarFilterForm(forms.Form):
     filter_calendar = forms.MultipleChoiceField(
@@ -43,6 +70,36 @@ class CalendarFilterForm(forms.Form):
         calendars = CFPBCalendar.objects.filter(title__in=calendar_names)
         return calendars
 
+class CalendarPDFForm(forms.Form):
+    filter_calendar = FilterCheckboxList(
+            choices = [(c.title, c.title) for c in CFPBCalendar.objects.all()],
+            required=True,
+            label='Calendar',
+            error_messages=ERROR_MESSAGES['CHECKBOX_ERRORS'])
+    filter_range_date_gte = FilterDateField(required=False,
+        error_messages=ERROR_MESSAGES['DATE_ERRORS'])
+    filter_range_date_lte = FilterDateField(required=False,
+        error_messages=ERROR_MESSAGES['DATE_ERRORS'])
+
+    def __init__(self, *args, **kwargs):
+        kwargs['error_class'] = FilterErrorList
+        super(CalendarPDFForm, self).__init__(*args, **kwargs)
+
+    def clean_filter_calendar(self):
+        calendar_names = self.cleaned_data['filter_calendar']
+        calendars = CFPBCalendar.objects.filter(title__in=calendar_names)
+        return calendars
+
+    def clean(self):
+        cleaned_data = super(CalendarPDFForm, self).clean()
+        from_date_empty = 'filter_range_date_gte' in cleaned_data and \
+                          cleaned_data['filter_range_date_gte']  == None
+        to_date_empty = 'filter_range_date_lte' in cleaned_data and \
+                        cleaned_data['filter_range_date_lte'] == None
+
+        if from_date_empty and to_date_empty :
+            raise forms.ValidationError(ERROR_MESSAGES['DATE_ERRORS']['one_required'])
+        return cleaned_data
 
 class PaginatorForSheerTemplates(Paginator):
     def __init__(self, request, *args, **kwargs):
@@ -63,11 +120,13 @@ def display(request, pdf=False):
     """
     display (potentially filtered) html view of the calendar
     """
-    template_name='about-us/the-bureau/leadership-calendar/index.html'
-    form = CalendarFilterForm(request.GET)
-    context = {'form': form}
 
-    if form.is_valid():
+    template_name='about-us/the-bureau/leadership-calendar/index.html'
+    form = CalendarPDFForm(request.GET) if pdf else CalendarFilterForm(request.GET)
+    context = {'form': form}
+    form_is_vaild = form.is_valid()
+
+    if form_is_vaild:
         cal_q = Q(('active', True))
         if form.cleaned_data.get('filter_calendar', None):
             calendars = form.cleaned_data['filter_calendar']
@@ -127,6 +186,12 @@ def display(request, pdf=False):
             if PDFreactor:
                 return pdf_response(request, context)
 
+    elif form_is_vaild == False and pdf:
+        for error in form.errors.itervalues():
+            messages.error(request, str(error), extra_tags='leadership-calendar')
+
+        return HttpResponseRedirect('/the-bureau/leadership-calendar/')
+
     return render(request, template_name, context)
 
 def pdf_response(request, context):
@@ -152,4 +217,5 @@ def pdf_response(request, context):
         response['Content-Disposition'] = 'attachment; filename=cfpb-leadership.pdf'
         return response
     except (urllib2.HTTPError, urllib2.URLError, BadStatusLine):
-        return render(request, template_name, context)
+        messages.error(request, 'Error Creating PDF', extra_tags='leadership-calendar')
+        return HttpResponseRedirect('/the-bureau/leadership-calendar/')

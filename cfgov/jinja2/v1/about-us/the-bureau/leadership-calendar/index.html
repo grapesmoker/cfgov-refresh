@@ -65,7 +65,7 @@
                 paginator,
                 events,
                 'calendar_event',
-                { 'expand_label': 'Filter calendars', 'show_errors': true }
+                { 'expand_label': 'Filter calendars', 'show_errors': false }
             ) }}
             {% if events and page_days %}
                 {{ calendar.render() }}
@@ -103,7 +103,7 @@
                     'action'              : 'pdf/',
                     'submit_label'        : 'Download PDF',
                     'form_method'         : 'get',
-                    'show_errors'         :  True
+                    'show_errors'         :  true
                 }
             ) }}
             {% import 'molecules/notification.html' as notification %}
